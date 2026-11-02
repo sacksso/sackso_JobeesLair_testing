@@ -1,0 +1,108 @@
+name: PS4 build
+
+# Manual build. This creates a workflow artifact only; it does not publish a
+# release or install over any existing beta.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ps4:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Run app tests
+        run: npm run test:all
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang-18 lld-18 llvm-18 llvm-18-dev cmake ninja-build \
+            nodejs npm python3-venv zlib1g-dev pkg-config unzip zip curl zstd \
+            libssl-dev libicu-dev
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 3.1.426
+
+      - name: Install Python dependencies
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --disable-pip-version-check \
+            -r ps5-react/requirements.txt
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install OpenOrbis PS4 toolchain
+        env:
+          TOOLCHAIN_URL: https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain/releases/download/v0.5.4/toolchain-llvm-18.tar.gz
+          TOOLCHAIN_SHA256: 3c7cd5bb593ca74fa1c13fd59f3938dc0fc07985167f7275063019e63abe4526
+        run: |
+          archive="$RUNNER_TEMP/openorbis-toolchain.tar.gz"
+          curl --fail --location --retry 3 "$TOOLCHAIN_URL" --output "$archive"
+          echo "$TOOLCHAIN_SHA256  $archive" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/openorbis"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/openorbis"
+          toolchain="$(find "$RUNNER_TEMP/openorbis" -type f -name link.x -printf '%h\n' -quit)"
+          test -n "$toolchain" || { echo "OpenOrbis toolchain link.x not found" >&2; exit 1; }
+          test -f "$toolchain/bin/linux/PkgTool.Core" || {
+            echo "OpenOrbis PkgTool.Core not found under $toolchain/bin/linux" >&2
+            exit 1
+          }
+          test -f "$toolchain/bin/linux/create-fself" || {
+            echo "OpenOrbis create-fself not found under $toolchain/bin/linux" >&2
+            exit 1
+          }
+          echo "OO_PS4_TOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
+          echo "OpenOrbis toolchain: $toolchain"
+
+      - name: Cache pinned build dependencies
+        uses: actions/cache@v4
+        with:
+          path: ps5-react/.deps
+          key: ps4-deps-${{ hashFiles('ps5-react/dependencies.lock.json') }}
+
+      - name: Build PS4 PKG
+        working-directory: ps5-react
+        run: |
+          python3 tools/build_ps4.py \
+            --app-dir "$GITHUB_WORKSPACE/app" \
+            --toolchain "$OO_PS4_TOOLCHAIN" \
+            --llvm /usr/lib/llvm-18/bin \
+            --network sce
+
+      - name: Prepare build artifact
+        run: |
+          set -euo pipefail
+          pkg="$(find ps5-react/dist/ps4 -maxdepth 1 -type f -name '*.pkg' -print -quit)"
+          test -n "$pkg" || { echo "PS4 PKG was not produced" >&2; exit 1; }
+          mkdir -p "$RUNNER_TEMP/ps4-artifact"
+          cp "$pkg" "$RUNNER_TEMP/ps4-artifact/"
+          (
+            cd "$RUNNER_TEMP/ps4-artifact"
+            sha256sum "$(basename "$pkg")" > SHA256SUMS
+          )
+          {
+            echo "Source commit: $GITHUB_SHA"
+            echo "OpenOrbis toolchain: v0.5.4"
+            echo "HTTP backend: Sony libSceHttp"
+            echo "Package identity: from app/app.json"
+            echo "This is a test build, not a hardware validation."
+          } > "$RUNNER_TEMP/ps4-artifact/BUILD-INFO.txt"
+          ls -lh "$RUNNER_TEMP/ps4-artifact"
+
+      - name: Upload PS4 PKG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JobeesLair-PS4-${{ github.sha }}
+          path: ${{ runner.temp }}/ps4-artifact/*
+          if-no-files-found: error
+          retention-days: 14
