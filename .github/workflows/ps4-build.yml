@@ -103,17 +103,23 @@ jobs:
           set -euo pipefail
           pkg="$(find ps5-react/dist/ps4 -maxdepth 1 -type f -name '*.pkg' -print -quit)"
           test -n "$pkg" || { echo "PS4 PKG was not produced" >&2; exit 1; }
+          elf="ps5-react/.build/app/ps4/eboot.elf"
+          test -s "$elf" || { echo "Unstripped PS4 ELF was not produced" >&2; exit 1; }
           mkdir -p "$RUNNER_TEMP/ps4-artifact"
           cp "$pkg" "$RUNNER_TEMP/ps4-artifact/"
+          cp "$elf" "$RUNNER_TEMP/ps4-artifact/eboot.elf"
+          /usr/lib/llvm-18/bin/llvm-nm -C --numeric-sort "$elf" \
+            > "$RUNNER_TEMP/ps4-artifact/eboot.symbols.txt"
           (
             cd "$RUNNER_TEMP/ps4-artifact"
-            sha256sum "$(basename "$pkg")" > SHA256SUMS
+            sha256sum "$(basename "$pkg")" eboot.elf eboot.symbols.txt > SHA256SUMS
           )
           {
             echo "Source commit: $GITHUB_SHA"
             echo "OpenOrbis toolchain: v0.5.4"
             echo "HTTP backend: Sony libSceHttp"
             echo "Package identity: from app/app.json"
+            echo "eboot.elf and eboot.symbols.txt are included for crash analysis."
             echo "This is a test build, not a hardware validation."
           } > "$RUNNER_TEMP/ps4-artifact/BUILD-INFO.txt"
           ls -lh "$RUNNER_TEMP/ps4-artifact"
